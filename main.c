@@ -245,19 +245,19 @@ static void handle_tty(int ev)
 	if (ev & POLLIN) {
 		char data[256];
 
-		term.need_redraw = true;
 		len = read(term.master_fd, data, sizeof(data));
 
 		if (len < 0) {
 			error("could not read from pty");
 		} else {
-			tsm_vte_input(term.vte, data, len);
+			term.need_redraw |= tsm_vte_input(term.vte, data, len);
 		}
 	}
 
 	if (ev & POLLHUP && len == 0) {
 		close(term.master_fd);
 		term.master_fd = -1;
+		term.need_redraw |= tsm_vte_flush_sync(term.vte);
 		if (!term.opt.linger)
 			term.die = true;
 	}
@@ -291,9 +291,10 @@ static void handle_repeat(void)
 			return;
 		}
 
-		tsm_vte_handle_keyboard(term.vte, term.repeat.sym,
-					XKB_KEY_NoSymbol, term.mods,
-					term.repeat.unicode);
+		if (tsm_vte_handle_keyboard(term.vte, term.repeat.sym,
+					    XKB_KEY_NoSymbol, term.mods,
+					    term.repeat.unicode))
+			term.need_redraw = true;
 	} else {
 		term.repeat.timeout -= diff;
 	}
@@ -1069,10 +1070,11 @@ static void kbd_key(void *data, struct wl_keyboard *k, uint32_t serial,
 
 	if (!action) {
 		if (tsm_vte_handle_keyboard(term.vte, sym, XKB_KEY_NoSymbol,
-					    term.mods, unicode) &&
-		    term.cfg.scroll_to_bottom_on_input &&
-		    tsm_screen_sb_reset(term.screen))
+					    term.mods, unicode)) {
+			if (term.cfg.scroll_to_bottom_on_input)
+				tsm_screen_sb_reset(term.screen);
 			term.need_redraw = true;
+		}
 	}
 
 	if (xkb_keymap_key_repeats(term.xkb_keymap, key + 8)) {
@@ -1775,6 +1777,7 @@ static void setup_pty(char *argv[])
 static void action_reset(void)
 {
 	tsm_vte_reset(term.vte);
+	term.need_redraw = true;
 }
 
 static void action_hard_reset(void)
@@ -2317,6 +2320,7 @@ retry:
 
 		wl_display_flush(term.display);
 
+		pollfds[EV_TTY].fd = term.master_fd;
 		pollfds[EV_PASTE].fd = term.paste.fd[0];
 		n = poll(pollfds, NUM_POLLFDS, term.repeat.timeout);
 		if (n < 0) {

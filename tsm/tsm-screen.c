@@ -303,7 +303,8 @@ static void screen_scroll_up_(struct tsm_screen *con, int num)
 	memcpy(&con->lines[con->margin_top + (max - num)],
 	       cache, num * sizeof(struct line*));
 
-	if (con->sel_active) {
+	/* Grid selections stay attached to the frozen rows. */
+	if (con->sel_active && !con->snapshot.active) {
 		if (!con->sel_start.line && con->sel_start.y >= 0) {
 			con->sel_start.y -= num;
 			if (con->sel_start.y < 0) {
@@ -328,7 +329,8 @@ static void screen_scroll_up_(struct tsm_screen *con, int num)
 static void screen_scroll_up(struct tsm_screen *con, int num)
 {
 	screen_scroll_up_(con, num);
-	tsm_screen_selection_retarget(con);
+	if (!con->snapshot.active)
+		tsm_screen_selection_retarget(con);
 }
 
 static void screen_scroll_down_(struct tsm_screen *con, int num)
@@ -372,7 +374,7 @@ static void screen_scroll_down_(struct tsm_screen *con, int num)
 	memcpy(&con->lines[con->margin_top],
 	       cache, num * sizeof(struct line*));
 
-	if (con->sel_active) {
+	if (con->sel_active && !con->snapshot.active) {
 		if (!con->sel_start.line && con->sel_start.y >= 0)
 			con->sel_start.y += num;
 		if (con->sel_finished && !con->sel_end.line && con->sel_end.y >= 0)
@@ -383,7 +385,8 @@ static void screen_scroll_down_(struct tsm_screen *con, int num)
 static void screen_scroll_down(struct tsm_screen *con, int num)
 {
 	screen_scroll_down_(con, num);
-	tsm_screen_selection_retarget(con);
+	if (!con->snapshot.active)
+		tsm_screen_selection_retarget(con);
 }
 
 static void screen_write(struct tsm_screen *con, int x, int y, tsm_symbol_t ch,
@@ -537,6 +540,7 @@ void tsm_screen_unref(struct tsm_screen *con)
 	if (!con->ref || --con->ref)
 		return;
 
+	screen_free_snapshot(con);
 	tsm_screen_clear_sb(con);
 	for (i = 0; i < con->line_num; ++i) {
 		line_free(con->main_lines[i]);
@@ -576,6 +580,27 @@ int tsm_screen_get_height(struct tsm_screen *con)
 	return con->size_y;
 }
 
+bool screen_release_snapshot(struct tsm_screen *con)
+{
+	if (!con->snapshot.active)
+		return false;
+	con->snapshot.active = false;
+	con->view_lines = con->lines;
+	/* Local redraws may have advanced the renderer's cached age. */
+	screen_inc_age(con);
+	con->age = con->age_cnt;
+	return true;
+}
+
+void screen_free_snapshot(struct tsm_screen *con)
+{
+	screen_release_snapshot(con);
+	free(con->snapshot.view_lines);
+	free(con->snapshot.lines);
+	free(con->snapshot.cells);
+	memset(&con->snapshot, 0, sizeof(con->snapshot));
+}
+
 SHL_EXPORT
 int tsm_screen_resize(struct tsm_screen *con, int x, int y)
 {
@@ -587,6 +612,7 @@ int tsm_screen_resize(struct tsm_screen *con, int x, int y)
 
 	if (con->size_x == x && con->size_y == y)
 		return 0;
+	screen_free_snapshot(con);
 
 	if (con->flags & TSM_SCREEN_ALTERNATE) {
 		main_attr = &con->main_def_attr;
@@ -610,7 +636,7 @@ int tsm_screen_resize(struct tsm_screen *con, int x, int y)
 			return -ENOMEM;
 
 		if (con->lines == con->main_lines)
-			con->lines = cache;
+			con->lines = con->view_lines = cache;
 		con->main_lines = cache;
 
 		/* resize alt buffer */
@@ -619,7 +645,7 @@ int tsm_screen_resize(struct tsm_screen *con, int x, int y)
 			return -ENOMEM;
 
 		if (con->lines == con->alt_lines)
-			con->lines = cache;
+			con->lines = con->view_lines = cache;
 		con->alt_lines = cache;
 
 		/* allocate new lines */
@@ -917,6 +943,8 @@ void tsm_screen_reset(struct tsm_screen *con)
 	con->margin_top = 0;
 	con->margin_bottom = con->size_y - 1;
 	con->lines = con->main_lines;
+	if (!con->snapshot.active)
+		con->view_lines = con->lines;
 
 	for (i = 0; i < con->size_x; ++i) {
 		if (i % 8 == 0)
@@ -943,6 +971,8 @@ void tsm_screen_set_flags(struct tsm_screen *con, unsigned int flags)
 	if (!(old & TSM_SCREEN_ALTERNATE) && (flags & TSM_SCREEN_ALTERNATE)) {
 		con->age = con->age_cnt;
 		con->lines = con->alt_lines;
+		if (!con->snapshot.active)
+			con->view_lines = con->lines;
 		memcpy(&con->main_def_attr, &con->def_attr,
 		       sizeof(con->main_def_attr));
 		memcpy(&con->def_attr, &con->alt_def_attr,
@@ -976,6 +1006,8 @@ void tsm_screen_reset_flags(struct tsm_screen *con, unsigned int flags)
 	if ((old & TSM_SCREEN_ALTERNATE) && (flags & TSM_SCREEN_ALTERNATE)) {
 		con->age = con->age_cnt;
 		con->lines = con->main_lines;
+		if (!con->snapshot.active)
+			con->view_lines = con->lines;
 		memcpy(&con->alt_def_attr, &con->def_attr,
 		       sizeof(con->alt_def_attr));
 		memcpy(&con->def_attr, &con->main_def_attr,
@@ -1593,5 +1625,5 @@ void tsm_screen_set_palette(struct tsm_screen *con, uint8_t palette[256][3])
 SHL_EXPORT
 uint8_t *tsm_screen_get_background(struct tsm_screen *con)
 {
-	return con->background;
+	return con->snapshot.active ? con->snapshot.background : con->background;
 }
